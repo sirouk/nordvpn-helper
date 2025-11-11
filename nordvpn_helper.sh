@@ -63,7 +63,8 @@ if [ "$LOGGED_IN" = false ]; then
     echo "  1. Token login (recommended for servers)"
     echo "  2. Browser login (opens browser, then uses callback URL)"
     echo ""
-    read -p "Choose login method (1 or 2): " LOGIN_METHOD
+    read -p "Choose login method (1 or 2) [2]: " LOGIN_METHOD
+    LOGIN_METHOD=${LOGIN_METHOD:-2}
     
     case $LOGIN_METHOD in
         1)
@@ -111,28 +112,13 @@ if [ "$LOGGED_IN" = false ]; then
             echo "3. After logging in, you'll be redirected to a 'Continue' page"
             echo "4. Right-click the 'Continue' button and copy the link address"
             echo ""
-            read -p "Paste the callback URL here (or press Enter to open browser automatically): " CALLBACK_URL
-            
-            # If no callback URL provided, try to extract from browser
-            if [ -z "$CALLBACK_URL" ]; then
-                echo ""
-                echo -e "${YELLOW}Attempting to open browser...${NC}"
-                if command -v xdg-open &> /dev/null; then
-                    xdg-open "$LOGIN_URL" 2>/dev/null &
-                elif command -v open &> /dev/null; then
-                    open "$LOGIN_URL" 2>/dev/null &
-                else
-                    echo -e "${YELLOW}Could not open browser automatically. Please open the URL manually.${NC}"
+            while true; do
+                read -p "Paste the callback URL here: " CALLBACK_URL
+                if [ -n "$CALLBACK_URL" ]; then
+                    break
                 fi
-                echo ""
-                echo -e "${YELLOW}After logging in and clicking Continue, paste the callback URL:${NC}"
-                read -p "Callback URL: " CALLBACK_URL
-            fi
-            
-            if [ -z "$CALLBACK_URL" ]; then
                 echo -e "${RED}Error: Callback URL cannot be empty.${NC}"
-                exit 1
-            fi
+            done
             
             echo ""
             echo -e "${YELLOW}Completing login with callback URL...${NC}"
@@ -179,7 +165,8 @@ echo ""
 echo -e "${YELLOW}Do you connect to this machine via port forwarding from work?${NC}"
 echo -e "  (e.g., router forwards external port → this machine)"
 echo ""
-read -p "Allow external SSH access? (y/n): " ALLOW_EXTERNAL_SSH
+read -p "Allow external SSH access? (y/n) [y]: " ALLOW_EXTERNAL_SSH
+ALLOW_EXTERNAL_SSH=${ALLOW_EXTERNAL_SSH:-y}
 
 if [[ "$ALLOW_EXTERNAL_SSH" =~ ^[Yy] ]]; then
     echo ""
@@ -187,7 +174,8 @@ if [[ "$ALLOW_EXTERNAL_SSH" =~ ^[Yy] ]]; then
     echo "  1. SSH port (22) will be allowlisted (bypasses VPN)"
     echo "  2. Optionally add your work IP/subnet to allowlist"
     echo ""
-    read -p "Add your work IP or subnet to allowlist? (y/n): " ADD_WORK_IP
+    read -p "Add your work IP or subnet to allowlist? (y/n) [y]: " ADD_WORK_IP
+    ADD_WORK_IP=${ADD_WORK_IP:-y}
     
     if [[ "$ADD_WORK_IP" =~ ^[Yy] ]]; then
         echo ""
@@ -293,7 +281,8 @@ echo -e "${CYAN}═════════════════════�
 echo -e "${CYAN}  Connect to VPN${NC}"
 echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
-read -p "Connect to VPN now? (y/n): " CONNECT_NOW
+read -p "Connect to VPN now? (y/n) [y]: " CONNECT_NOW
+CONNECT_NOW=${CONNECT_NOW:-y}
 
 if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
     echo ""
@@ -320,14 +309,20 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
         fi
         
         echo ""
-        echo -e "${YELLOW}Enter country name (or press Enter for fastest server):${NC}"
+        echo -e "${YELLOW}Enter country name [Ireland] (type 'fastest' for fastest server):${NC}"
         echo -e "${CYAN}Examples: United_States, United_Kingdom, Netherlands, Japan${NC}"
         echo -e "${CYAN}Note: Use underscores for multi-word countries (e.g., United_States)${NC}"
         echo ""
         read -p "Country: " SELECTED_COUNTRY
         
-        echo ""
         if [ -z "$SELECTED_COUNTRY" ]; then
+            SELECTED_COUNTRY="Ireland"
+            echo ""
+            echo -e "${YELLOW}Defaulting to Ireland...${NC}"
+        fi
+        
+        if [[ "${SELECTED_COUNTRY,,}" == "fastest" ]]; then
+            echo ""
             echo -e "${YELLOW}Connecting to fastest server...${NC}"
             if nordvpn connect; then
                 echo -e "${GREEN}✓ Connected successfully!${NC}"
@@ -338,6 +333,7 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
             # Normalize input: convert spaces to underscores, capitalize first letter of each word
             NORMALIZED=$(echo "$SELECTED_COUNTRY" | sed 's/ /_/g' | sed 's/\b\(.\)/\u\1/g')
             
+            echo ""
             echo -e "${YELLOW}Connecting to $NORMALIZED...${NC}"
             if nordvpn connect "$NORMALIZED"; then
                 echo -e "${GREEN}✓ Connected to $NORMALIZED successfully!${NC}"
