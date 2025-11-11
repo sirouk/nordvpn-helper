@@ -290,23 +290,18 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
     COUNTRIES=$(nordvpn countries 2>&1)
     
     if [ $? -eq 0 ] && [ -n "$COUNTRIES" ]; then
+        mapfile -t COUNTRY_ARRAY < <(echo "$COUNTRIES" | awk '{for (i=1; i<=NF; ++i) print $i}')
+        TOTAL_COUNTRIES=${#COUNTRY_ARRAY[@]}
         echo ""
-        echo -e "${CYAN}Available Countries (showing first 50):${NC}"
-        TOTAL_COUNTRIES=$(echo "$COUNTRIES" | wc -l)
-        DISPLAY_COUNT=50
+        echo -e "${CYAN}Available Countries (${TOTAL_COUNTRIES} total):${NC}"
         
-        # Display countries in a readable format
-        echo "$COUNTRIES" | head -$DISPLAY_COUNT | while IFS= read -r country; do
-            # Format country names (replace underscores with spaces, capitalize words)
+        for ((idx=0; idx<TOTAL_COUNTRIES; idx++)); do
+            country="${COUNTRY_ARRAY[$idx]}"
             formatted=$(echo "$country" | sed 's/_/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
-            printf "  %-40s %s\n" "$formatted" "($country)"
+            printf "  %2d. %-32s (%s)\n" $((idx + 1)) "$formatted" "$country"
         done
-        
-        if [ $TOTAL_COUNTRIES -gt $DISPLAY_COUNT ]; then
-            echo ""
-            echo -e "${YELLOW}  ... and $((TOTAL_COUNTRIES - DISPLAY_COUNT)) more countries${NC}"
-            echo -e "${CYAN}  (Use the exact format shown in parentheses)${NC}"
-        fi
+        echo ""
+        echo -e "${CYAN}  (Use the exact format shown in parentheses)${NC}"
         
         echo ""
         echo -e "${YELLOW}Enter country name [Ireland] (type 'fastest' for fastest server):${NC}"
