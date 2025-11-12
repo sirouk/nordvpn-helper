@@ -16,10 +16,9 @@ echo ""
 
 # Check if nordvpn is installed
 if ! command -v nordvpn &> /dev/null; then
-    echo -e "${RED}Error: NordVPN is not installed.${NC}"
-    echo "Please install it first with:"
-    echo "  curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh | sh"
-    exit 1
+    echo -e "${RED}Error: NordVPN is not installed. Installing...${NC}"
+    wget https://downloads.nordcdn.com/apps/linux/install.sh -O $HOME/install_nordvpn.sh
+    bash install_nordvpn.sh
 fi
 
 # Check current login status
