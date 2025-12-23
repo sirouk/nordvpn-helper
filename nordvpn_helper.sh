@@ -23,7 +23,7 @@ fi
 
 # Check current login status
 echo -e "${YELLOW}Checking NordVPN status...${NC}"
-if nordvpn account 2>&1 | grep -q "You are not logged in"; then
+if nordvpn account 2>&1 | grep -iq "not logged in"; then
     echo -e "${YELLOW}Not logged in. Proceeding with login...${NC}"
     LOGGED_IN=false
 else
