@@ -155,6 +155,28 @@ else
     exit 1
 fi
 
+# Configure Firewall (Crucial for WSL)
+echo ""
+echo -e "${YELLOW}Configuring NordVPN Firewall (Disabling for WSL compatibility)...${NC}"
+FIREWALL_OUTPUT=$(nordvpn set firewall disabled 2>&1) || true
+if echo "$FIREWALL_OUTPUT" | grep -qE "successfully|already"; then
+    echo -e "${GREEN}✓ Firewall disabled${NC}"
+else
+    echo -e "${RED}✗ Failed to disable firewall${NC}"
+    echo "Output: $FIREWALL_OUTPUT"
+fi
+
+# Configure Technology (NordLynx is recommended for performance)
+echo ""
+echo -e "${YELLOW}Configuring Technology (Setting to NordLynx)...${NC}"
+TECH_OUTPUT=$(nordvpn set technology nordlynx 2>&1) || true
+if echo "$TECH_OUTPUT" | grep -qE "successfully|already"; then
+    echo -e "${GREEN}✓ Technology set to NordLynx${NC}"
+else
+    echo -e "${RED}✗ Failed to set technology to NordLynx${NC}"
+    echo "Output: $TECH_OUTPUT"
+fi
+
 # Ask about external SSH access (port forwarding scenario)
 echo ""
 echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
@@ -249,10 +271,12 @@ echo -e "${GREEN}Configuration Complete!${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${YELLOW}Current NordVPN Settings:${NC}"
-nordvpn settings | grep -E "LAN Discovery|Allowlisted"
+nordvpn settings | grep -E "LAN Discovery|Allowlisted|Firewall|Technology"
 echo ""
 echo -e "${CYAN}Summary:${NC}"
 echo -e "  • Local network ($NETWORK): ${GREEN}Accessible${NC} (LAN Discovery)"
+echo -e "  • Firewall: ${GREEN}Disabled${NC} (WSL Compatibility)"
+echo -e "  • Technology: ${GREEN}NordLynx${NC} (Performance)"
 echo -e "  • SSH port 22: ${GREEN}Bypasses VPN${NC} (allowlisted)"
 if [[ "$ALLOW_EXTERNAL_SSH" =~ ^[Yy] ]]; then
     echo -e "  • External SSH: ${GREEN}Should work${NC} (port 22 allowlisted)"
