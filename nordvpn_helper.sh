@@ -9,6 +9,50 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Add a subnet to NordVPN allowlist (idempotent-ish with friendly output)
+add_allowlist_subnet() {
+    local subnet="$1"
+    local label="$2"
+    local out
+    local code
+
+    out=$(nordvpn allowlist add subnet "$subnet" 2>&1) || true
+    code=$?
+    if [ $code -eq 0 ] || echo "$out" | grep -qi "already allowlisted\|already"; then
+        if echo "$out" | grep -qi "already"; then
+            echo -e "${GREEN}✓ $label $subnet already allowlisted${NC}"
+        else
+            echo -e "${GREEN}✓ $label $subnet added to allowlist${NC}"
+        fi
+    elif echo "$out" | grep -qi "not available while local network discovery is enabled"; then
+        echo -e "${YELLOW}ℹ Could not add $label $subnet while LAN Discovery is enabled${NC}"
+    else
+        echo -e "${YELLOW}ℹ Could not add $label $subnet${NC}"
+        echo "Output: $out"
+    fi
+}
+
+# Add a port to NordVPN allowlist (idempotent-ish with friendly output)
+add_allowlist_port() {
+    local port="$1"
+    local label="$2"
+    local out
+    local code
+
+    out=$(nordvpn allowlist add port "$port" 2>&1) || true
+    code=$?
+    if [ $code -eq 0 ] || echo "$out" | grep -qi "already allowlisted\|already"; then
+        if echo "$out" | grep -qi "already"; then
+            echo -e "${GREEN}✓ $label port $port already allowlisted${NC}"
+        else
+            echo -e "${GREEN}✓ $label port $port added to allowlist${NC}"
+        fi
+    else
+        echo -e "${YELLOW}ℹ Could not add $label port $port${NC}"
+        echo "Output: $out"
+    fi
+}
+
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}  NordVPN Setup Script${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
@@ -55,6 +99,46 @@ fi
 echo -e "  Local IP: ${GREEN}$LOCAL_IP${NC}"
 echo -e "  Network: ${GREEN}$NETWORK${NC}"
 echo ""
+
+# Detect Tailscale (if installed)
+TAILSCALE_AVAILABLE=false
+TAILSCALE_UP=false
+TAILSCALE_IPV4_LIST=""
+TAILSCALE_IPV6_LIST=""
+TAILSCALE_ALL_IPS=""
+
+if command -v tailscale &> /dev/null; then
+    TAILSCALE_AVAILABLE=true
+    TAILSCALE_IPV4_LIST=$(tailscale ip -4 2>/dev/null || true)
+    TAILSCALE_IPV6_LIST=$(tailscale ip -6 2>/dev/null || true)
+    if [ -n "$TAILSCALE_IPV4_LIST" ] || [ -n "$TAILSCALE_IPV6_LIST" ]; then
+        TAILSCALE_UP=true
+        if tailscale status --json >/tmp/ts_status.json 2>/dev/null; then
+            TAILSCALE_ALL_IPS=$(python3 - <<'PY' 2>/dev/null || true
+import json
+from ipaddress import ip_address
+
+with open("/tmp/ts_status.json", "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+ips = set()
+self_node = data.get("Self") or {}
+for ip in self_node.get("TailscaleIPs") or []:
+    ips.add(ip)
+for peer in (data.get("Peer") or {}).values():
+    for ip in (peer.get("TailscaleIPs") or []):
+        ips.add(ip)
+
+for ip in sorted(ips, key=lambda s: (ip_address(s).version, int(ip_address(s)))):
+    print(ip)
+PY
+)
+        fi
+        if [ -z "$TAILSCALE_ALL_IPS" ]; then
+            TAILSCALE_ALL_IPS="$TAILSCALE_IPV4_LIST"$'\n'"$TAILSCALE_IPV6_LIST"
+        fi
+    fi
+fi
 
 # Login if needed
 if [ "$LOGGED_IN" = false ]; then
@@ -175,6 +259,74 @@ if echo "$TECH_OUTPUT" | grep -qE "successfully|already"; then
 else
     echo -e "${RED}✗ Failed to set technology to NordLynx${NC}"
     echo "Output: $TECH_OUTPUT"
+fi
+
+# Configure Tailscale coexistence with NordVPN
+if [ "$TAILSCALE_AVAILABLE" = true ]; then
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  Tailscale Coexistence Configuration${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    if [ "$TAILSCALE_UP" = true ]; then
+        echo -e "${GREEN}✓ Tailscale detected and active${NC}"
+        if [ -n "$TAILSCALE_IPV4_LIST" ]; then
+            echo -e "  Local Tailscale IPv4: ${GREEN}$(echo "$TAILSCALE_IPV4_LIST" | tr '\n' ' ')${NC}"
+        fi
+        if [ -n "$TAILSCALE_IPV6_LIST" ]; then
+            echo -e "  Local Tailscale IPv6: ${GREEN}$(echo "$TAILSCALE_IPV6_LIST" | tr '\n' ' ')${NC}"
+        fi
+        echo ""
+        echo -e "${YELLOW}Enable NordVPN+Tailscale coexistence mode?${NC}"
+        echo -e "  This adds Tailscale traffic to NordVPN allowlist so your tailnet can still reach this node."
+        read -p "Enable coexistence mode? (y/n) [y]: " ENABLE_TS_COEXIST
+        ENABLE_TS_COEXIST=${ENABLE_TS_COEXIST:-y}
+
+        if [[ "$ENABLE_TS_COEXIST" =~ ^[Yy] ]]; then
+            echo ""
+            echo -e "${YELLOW}Choose allowlist scope:${NC}"
+            echo "  1. Broad (recommended): allow Tailscale CGNAT + ULA ranges"
+            echo "     - 100.64.0.0/10"
+            echo "     - fd7a:115c:a1e0::/48"
+            echo "  2. Precise: allow only currently detected Tailscale node IPs"
+            read -p "Select option (1 or 2) [1]: " TS_SCOPE
+            TS_SCOPE=${TS_SCOPE:-1}
+
+            echo ""
+            echo -e "${YELLOW}Applying Tailscale allowlist rules...${NC}"
+            if [ "$TS_SCOPE" = "2" ]; then
+                if [ -z "$TAILSCALE_ALL_IPS" ]; then
+                    echo -e "${YELLOW}ℹ Could not read Tailscale peer IPs; falling back to broad mode.${NC}"
+                    add_allowlist_subnet "100.64.0.0/10" "Tailscale IPv4 range"
+                    add_allowlist_subnet "fd7a:115c:a1e0::/48" "Tailscale IPv6 range"
+                else
+                    while IFS= read -r ts_ip; do
+                        [ -z "$ts_ip" ] && continue
+                        if [[ "$ts_ip" == *:* ]]; then
+                            add_allowlist_subnet "$ts_ip/128" "Tailscale node"
+                        else
+                            add_allowlist_subnet "$ts_ip/32" "Tailscale node"
+                        fi
+                    done <<< "$TAILSCALE_ALL_IPS"
+                fi
+            else
+                add_allowlist_subnet "100.64.0.0/10" "Tailscale IPv4 range"
+                add_allowlist_subnet "fd7a:115c:a1e0::/48" "Tailscale IPv6 range"
+            fi
+
+            echo ""
+            echo -e "${YELLOW}Optional: allowlist Tailscale coordination port (UDP 41641)${NC}"
+            read -p "Add UDP 41641 to allowlist? (y/n) [y]: " TS_PORT_ALLOW
+            TS_PORT_ALLOW=${TS_PORT_ALLOW:-y}
+            if [[ "$TS_PORT_ALLOW" =~ ^[Yy] ]]; then
+                add_allowlist_port "41641" "Tailscale"
+            fi
+        else
+            echo -e "${YELLOW}Skipping Tailscale coexistence configuration.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}ℹ Tailscale installed but not active (no Tailscale IP assigned).${NC}"
+        echo -e "  Start it first with: ${CYAN}tailscale up${NC}"
+    fi
 fi
 
 # Ask about external SSH access (port forwarding scenario)
@@ -386,4 +538,3 @@ else
     echo "  nordvpn countries                  # List all countries"
 fi
 echo ""
-
