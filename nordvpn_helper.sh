@@ -53,6 +53,66 @@ add_allowlist_port() {
     fi
 }
 
+# Fetch public IPv4 from a fallback list of services.
+fetch_public_ipv4() {
+    local ip=""
+    ip=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    if [ -z "$ip" ]; then
+        ip=$(curl -4 -s --max-time 10 https://ifconfig.me/ip 2>/dev/null || true)
+    fi
+    echo "$ip"
+}
+
+# Print status and optional dedicated-IP match check.
+print_connection_verification() {
+    local expected_ip="$1"
+    local public_ip=""
+
+    echo ""
+    echo -e "${YELLOW}Connection Status:${NC}"
+    nordvpn status || true
+
+    public_ip=$(fetch_public_ipv4)
+    if [ -n "$public_ip" ]; then
+        echo -e "Public IPv4: ${GREEN}${public_ip}${NC}"
+        if [ -n "$expected_ip" ]; then
+            if [ "$public_ip" = "$expected_ip" ]; then
+                echo -e "${GREEN}✓ Dedicated IP confirmed (${expected_ip})${NC}"
+            else
+                echo -e "${YELLOW}⚠ Expected dedicated IP ${expected_ip}, but got ${public_ip}${NC}"
+                echo -e "${YELLOW}  Verify server selection and NordVPN dedicated-IP assignment.${NC}"
+            fi
+        fi
+    else
+        echo -e "${YELLOW}Could not fetch public IPv4 (curl failed).${NC}"
+    fi
+}
+
+# Best-effort discovery of a previously used server id (e.g., ie214).
+# Priority:
+#   1) server token from "Auto-connect" settings line (if configured),
+#   2) current connection hostname token from "nordvpn status".
+detect_preferred_server_id() {
+    local settings status token host
+
+    settings=$(nordvpn settings 2>/dev/null || true)
+    token=$(echo "$settings" | grep -Ei '^Auto-connect:' | grep -Eo '[a-z]{2}[0-9]+' | head -1 || true)
+    if [ -n "$token" ]; then
+        echo "$token"
+        return
+    fi
+
+    status=$(nordvpn status 2>/dev/null || true)
+    host=$(echo "$status" | awk -F': ' '/^Hostname:/{print $2}' | head -1 || true)
+    token=$(echo "$host" | awk -F'.' '{print $1}' | tr '[:upper:]' '[:lower:]')
+    if echo "$token" | grep -Eq '^[a-z]{2}[0-9]+$'; then
+        echo "$token"
+        return
+    fi
+
+    echo ""
+}
+
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}  NordVPN Setup Script${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
@@ -437,12 +497,15 @@ fi
 echo ""
 echo -e "${BLUE}To connect to VPN:${NC}"
 echo "  nordvpn connect"
+echo "  nordvpn connect <server_id>         # Specific server (e.g., us123, ie214)"
 echo ""
 echo -e "${BLUE}To check status:${NC}"
 echo "  nordvpn status"
+echo "  curl -4 -s https://api.ipify.org    # Check public IPv4"
 echo ""
 echo -e "${BLUE}To disconnect:${NC}"
 echo "  nordvpn disconnect"
+echo "  nordvpn set autoconnect on <server_id>  # Pin auto-connect to a specific server"
 echo ""
 echo -e "${YELLOW}Important Notes:${NC}"
 echo -e "  • SSH port 22 is allowlisted, so SSH traffic bypasses VPN"
@@ -461,80 +524,135 @@ CONNECT_NOW=${CONNECT_NOW:-y}
 
 if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
     echo ""
-    echo -e "${YELLOW}Fetching available countries...${NC}"
-    COUNTRIES=$(nordvpn countries 2>&1)
-    
-    if [ $? -eq 0 ] && [ -n "$COUNTRIES" ]; then
-        mapfile -t COUNTRY_ARRAY < <(echo "$COUNTRIES" | awk '{for (i=1; i<=NF; ++i) print $i}')
-        TOTAL_COUNTRIES=${#COUNTRY_ARRAY[@]}
+    echo -e "${YELLOW}Choose connection mode:${NC}"
+    echo "  1. Fastest server"
+    echo "  2. Specific country (default flow)"
+    echo "  3. Dedicated IP server (connect by server id)"
+    echo ""
+    read -p "Mode (1/2/3) [2]: " CONNECT_MODE
+    CONNECT_MODE=${CONNECT_MODE:-2}
+
+    if [ "$CONNECT_MODE" = "1" ]; then
         echo ""
-        echo -e "${CYAN}Available Countries (${TOTAL_COUNTRIES} total):${NC}"
-        
-        for ((idx=0; idx<TOTAL_COUNTRIES; idx++)); do
-            country="${COUNTRY_ARRAY[$idx]}"
-            formatted=$(echo "$country" | sed 's/_/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
-            printf "  %2d. %-32s (%s)\n" $((idx + 1)) "$formatted" "$country"
-        done
-        echo ""
-        echo -e "${CYAN}  (Use the exact format shown in parentheses)${NC}"
-        
-        echo ""
-        echo -e "${YELLOW}Enter country name [Ireland] (type 'fastest' for fastest server):${NC}"
-        echo -e "${CYAN}Examples: United_States, United_Kingdom, Netherlands, Japan${NC}"
-        echo -e "${CYAN}Note: Use underscores for multi-word countries (e.g., United_States)${NC}"
-        echo ""
-        read -p "Country: " SELECTED_COUNTRY
-        
-        if [ -z "$SELECTED_COUNTRY" ]; then
-            SELECTED_COUNTRY="Ireland"
-            echo ""
-            echo -e "${YELLOW}Defaulting to Ireland...${NC}"
-        fi
-        
-        if [[ "${SELECTED_COUNTRY,,}" == "fastest" ]]; then
-            echo ""
-            echo -e "${YELLOW}Connecting to fastest server...${NC}"
-            if nordvpn connect; then
-                echo -e "${GREEN}✓ Connected successfully!${NC}"
-            else
-                echo -e "${RED}✗ Connection failed${NC}"
-            fi
-        else
-            # Normalize input: convert spaces to underscores, capitalize first letter of each word
-            NORMALIZED=$(echo "$SELECTED_COUNTRY" | sed 's/ /_/g' | sed 's/\b\(.\)/\u\1/g')
-            
-            echo ""
-            echo -e "${YELLOW}Connecting to $NORMALIZED...${NC}"
-            if nordvpn connect "$NORMALIZED"; then
-                echo -e "${GREEN}✓ Connected to $NORMALIZED successfully!${NC}"
-            else
-                echo -e "${RED}✗ Connection failed${NC}"
-                echo -e "${YELLOW}Trying with original input: $SELECTED_COUNTRY${NC}"
-                if nordvpn connect "$SELECTED_COUNTRY"; then
-                    echo -e "${GREEN}✓ Connected successfully!${NC}"
-                else
-                    echo -e "${RED}✗ Connection failed. Please check the country name.${NC}"
-                    echo -e "${YELLOW}Use 'nordvpn countries' to see the exact format.${NC}"
-                fi
-            fi
-            
-            echo ""
-            echo -e "${YELLOW}Connection Status:${NC}"
-            nordvpn status
-        fi
-    else
-        echo -e "${YELLOW}Could not fetch countries list. Connecting to fastest server...${NC}"
+        echo -e "${YELLOW}Connecting to fastest server...${NC}"
         if nordvpn connect; then
             echo -e "${GREEN}✓ Connected successfully!${NC}"
+            print_connection_verification ""
         else
             echo -e "${RED}✗ Connection failed${NC}"
+        fi
+    elif [ "$CONNECT_MODE" = "3" ]; then
+        echo ""
+        echo -e "${YELLOW}Dedicated IP mode${NC}"
+        echo -e "${CYAN}Use the server identifier from Nord Account (e.g., ie214, us123).${NC}"
+        PREFERRED_SERVER_ID=$(detect_preferred_server_id)
+        if [ -n "$PREFERRED_SERVER_ID" ]; then
+            echo -e "${CYAN}Detected previous server id: ${PREFERRED_SERVER_ID}${NC}"
+            read -p "Dedicated server id [${PREFERRED_SERVER_ID}]: " DEDICATED_SERVER
+            DEDICATED_SERVER=${DEDICATED_SERVER:-$PREFERRED_SERVER_ID}
+        else
+            read -p "Dedicated server id: " DEDICATED_SERVER
+        fi
+
+        if [ -z "$DEDICATED_SERVER" ]; then
+            echo -e "${RED}Dedicated server id cannot be empty.${NC}"
+            exit 1
+        fi
+
+        read -p "Expected dedicated public IPv4 (optional): " EXPECTED_DEDICATED_IP
+
+        echo ""
+        echo -e "${YELLOW}Connecting to dedicated server ${DEDICATED_SERVER}...${NC}"
+        if nordvpn connect "${DEDICATED_SERVER}"; then
+            echo -e "${GREEN}✓ Connected to ${DEDICATED_SERVER} successfully!${NC}"
+            print_connection_verification "${EXPECTED_DEDICATED_IP}"
+            echo ""
+            echo -e "${CYAN}Optional: persist this on reboot:${NC}"
+            echo "  nordvpn set autoconnect on ${DEDICATED_SERVER}"
+        else
+            echo -e "${RED}✗ Connection failed${NC}"
+            echo -e "${YELLOW}Check the dedicated server id and that Dedicated IP service is active.${NC}"
+            echo -e "${YELLOW}You can also try: nordvpn connect --group Dedicated_IP${NC}"
+        fi
+    else
+        echo ""
+        echo -e "${YELLOW}Fetching available countries...${NC}"
+        COUNTRIES=$(nordvpn countries 2>&1)
+
+        if [ $? -eq 0 ] && [ -n "$COUNTRIES" ]; then
+            mapfile -t COUNTRY_ARRAY < <(echo "$COUNTRIES" | awk '{for (i=1; i<=NF; ++i) print $i}')
+            TOTAL_COUNTRIES=${#COUNTRY_ARRAY[@]}
+            echo ""
+            echo -e "${CYAN}Available Countries (${TOTAL_COUNTRIES} total):${NC}"
+
+            for ((idx=0; idx<TOTAL_COUNTRIES; idx++)); do
+                country="${COUNTRY_ARRAY[$idx]}"
+                formatted=$(echo "$country" | sed 's/_/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
+                printf "  %2d. %-32s (%s)\n" $((idx + 1)) "$formatted" "$country"
+            done
+            echo ""
+            echo -e "${CYAN}  (Use the exact format shown in parentheses)${NC}"
+
+            echo ""
+            echo -e "${YELLOW}Enter country name [Ireland] (type 'fastest' for fastest server):${NC}"
+            echo -e "${CYAN}Examples: United_States, United_Kingdom, Netherlands, Japan${NC}"
+            echo -e "${CYAN}Note: Use underscores for multi-word countries (e.g., United_States)${NC}"
+            echo ""
+            read -p "Country: " SELECTED_COUNTRY
+
+            if [ -z "$SELECTED_COUNTRY" ]; then
+                SELECTED_COUNTRY="Ireland"
+                echo ""
+                echo -e "${YELLOW}Defaulting to Ireland...${NC}"
+            fi
+
+            if [[ "${SELECTED_COUNTRY,,}" == "fastest" ]]; then
+                echo ""
+                echo -e "${YELLOW}Connecting to fastest server...${NC}"
+                if nordvpn connect; then
+                    echo -e "${GREEN}✓ Connected successfully!${NC}"
+                    print_connection_verification ""
+                else
+                    echo -e "${RED}✗ Connection failed${NC}"
+                fi
+            else
+                # Normalize input: convert spaces to underscores, capitalize first letter of each word
+                NORMALIZED=$(echo "$SELECTED_COUNTRY" | sed 's/ /_/g' | sed 's/\b\(.\)/\u\1/g')
+
+                echo ""
+                echo -e "${YELLOW}Connecting to $NORMALIZED...${NC}"
+                if nordvpn connect "$NORMALIZED"; then
+                    echo -e "${GREEN}✓ Connected to $NORMALIZED successfully!${NC}"
+                else
+                    echo -e "${RED}✗ Connection failed${NC}"
+                    echo -e "${YELLOW}Trying with original input: $SELECTED_COUNTRY${NC}"
+                    if nordvpn connect "$SELECTED_COUNTRY"; then
+                        echo -e "${GREEN}✓ Connected successfully!${NC}"
+                    else
+                        echo -e "${RED}✗ Connection failed. Please check the country name.${NC}"
+                        echo -e "${YELLOW}Use 'nordvpn countries' to see the exact format.${NC}"
+                    fi
+                fi
+
+                print_connection_verification ""
+            fi
+        else
+            echo -e "${YELLOW}Could not fetch countries list. Connecting to fastest server...${NC}"
+            if nordvpn connect; then
+                echo -e "${GREEN}✓ Connected successfully!${NC}"
+                print_connection_verification ""
+            else
+                echo -e "${RED}✗ Connection failed${NC}"
+            fi
         fi
     fi
 else
     echo ""
     echo -e "${CYAN}You can connect later with:${NC}"
     echo "  nordvpn connect                    # Fastest server"
+    echo "  nordvpn connect <server_id>        # Specific server (e.g., us123, ie214)"
     echo "  nordvpn connect United_States      # Specific country"
+    echo "  nordvpn set autoconnect on <server_id>  # Keep using one server on reboot"
     echo "  nordvpn countries                  # List all countries"
 fi
 echo ""
