@@ -548,11 +548,10 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
         PREFERRED_SERVER_ID=$(detect_preferred_server_id)
         if [ -n "$PREFERRED_SERVER_ID" ]; then
             echo -e "${CYAN}Detected previous server id: ${PREFERRED_SERVER_ID}${NC}"
-            read -p "Dedicated server id [${PREFERRED_SERVER_ID}]: " DEDICATED_SERVER
-            DEDICATED_SERVER=${DEDICATED_SERVER:-$PREFERRED_SERVER_ID}
-        else
-            read -p "Dedicated server id: " DEDICATED_SERVER
         fi
+        read -p "Dedicated server id [ie214]: " DEDICATED_SERVER
+        # default to ie214 when enter is pressed
+        DEDICATED_SERVER=${DEDICATED_SERVER:-ie214}
 
         if [ -z "$DEDICATED_SERVER" ]; then
             echo -e "${RED}Dedicated server id cannot be empty.${NC}"

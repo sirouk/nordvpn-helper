@@ -7,7 +7,7 @@ Minimal helper for first-time NordVPN CLI setup on Linux.
 - Flow: confirms login, forces LAN discovery on, allowlists SSH (22) and optional work IP, then guides you to connect with one of:
   - fastest server,
   - country-based server (defaults to Ireland),
-  - dedicated-IP server by server id (for example: `ie214`, `us123`).
+  - dedicated-IP server by server id (defaults to `ie214`; for example: `ie214`, `us123`).
 - Dedicated mode can optionally verify your expected public IP after connect.
 - Dedicated mode auto-suggests a previous server id when it can detect one from NordVPN state.
 
