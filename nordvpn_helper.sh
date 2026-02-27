@@ -80,7 +80,12 @@ print_connection_verification() {
                 echo -e "${GREEN}✓ Dedicated IP confirmed (${expected_ip})${NC}"
             else
                 echo -e "${YELLOW}⚠ Expected dedicated IP ${expected_ip}, but got ${public_ip}${NC}"
-                echo -e "${YELLOW}  Verify server selection and NordVPN dedicated-IP assignment.${NC}"
+                echo -e "${YELLOW}  The server is correct but NordVPN is using a shared pool IP instead.${NC}"
+                echo -e "${CYAN}  Steps to fix:${NC}"
+                echo -e "    1. Update NordVPN: sh <(curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh)"
+                echo -e "    2. Re-login to refresh the dedicated IP token:"
+                echo -e "       nordvpn disconnect && nordvpn logout && nordvpn login --token <token>"
+                echo -e "    3. Reconnect: nordvpn connect --group Dedicated_IP"
             fi
         fi
     else
@@ -88,30 +93,6 @@ print_connection_verification() {
     fi
 }
 
-# Best-effort discovery of a previously used server id (e.g., ie214).
-# Priority:
-#   1) server token from "Auto-connect" settings line (if configured),
-#   2) current connection hostname token from "nordvpn status".
-detect_preferred_server_id() {
-    local settings status token host
-
-    settings=$(nordvpn settings 2>/dev/null || true)
-    token=$(echo "$settings" | grep -Ei '^Auto-connect:' | grep -Eo '[a-z]{2}[0-9]+' | head -1 || true)
-    if [ -n "$token" ]; then
-        echo "$token"
-        return
-    fi
-
-    status=$(nordvpn status 2>/dev/null || true)
-    host=$(echo "$status" | awk -F': ' '/^Hostname:/{print $2}' | head -1 || true)
-    token=$(echo "$host" | awk -F'.' '{print $1}' | tr '[:upper:]' '[:lower:]')
-    if echo "$token" | grep -Eq '^[a-z]{2}[0-9]+$'; then
-        echo "$token"
-        return
-    fi
-
-    echo ""
-}
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}  NordVPN Setup Script${NC}"
@@ -125,8 +106,48 @@ if ! command -v nordvpn &> /dev/null; then
     bash install_nordvpn.sh
 fi
 
+# Check for NordVPN update (must happen before any nordvpn commands that show the warning)
+echo -e "${YELLOW}Checking NordVPN version...${NC}"
+VERSION_CHECK=$(nordvpn --version 2>/dev/null || true)
+if nordvpn account 2>&1 | grep -qi "new version\|please update"; then
+    UPDATE_AVAILABLE=true
+elif nordvpn connect --help 2>&1 | grep -qi "new version\|please update"; then
+    UPDATE_AVAILABLE=true
+else
+    # Run a cheap command to capture update nag
+    _nag=$(nordvpn status 2>&1 || true)
+    if echo "$_nag" | grep -qi "new version\|please update"; then
+        UPDATE_AVAILABLE=true
+    else
+        UPDATE_AVAILABLE=false
+    fi
+fi
+
+if [ "$UPDATE_AVAILABLE" = true ]; then
+    echo -e "${YELLOW}⚠ A new version of NordVPN is available.${NC}"
+    echo -e "  ${RED}Outdated NordVPN versions are known to break Dedicated IP routing.${NC}"
+    echo -e "  ${CYAN}It is strongly recommended to update before continuing.${NC}"
+    echo ""
+    read -p "Update NordVPN now? (y/n) [y]: " DO_UPDATE
+    DO_UPDATE=${DO_UPDATE:-y}
+    if [[ "$DO_UPDATE" =~ ^[Yy] ]]; then
+        echo -e "${YELLOW}Updating NordVPN...${NC}"
+        if sh <(curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh); then
+            echo -e "${GREEN}✓ NordVPN updated successfully.${NC}"
+            echo -e "${YELLOW}Note: You may need to re-login after the update.${NC}"
+        else
+            echo -e "${RED}✗ Update failed. Continuing with current version.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Skipping update. Dedicated IP may not work correctly with an outdated app.${NC}"
+    fi
+    echo ""
+else
+    echo -e "${GREEN}✓ NordVPN is up to date.${NC}"
+fi
+
 # Check current login status
-echo -e "${YELLOW}Checking NordVPN status...${NC}"
+echo -e "${YELLOW}Checking NordVPN login status...${NC}"
 if nordvpn account 2>&1 | grep -iq "not logged in"; then
     echo -e "${YELLOW}Not logged in. Proceeding with login...${NC}"
     LOGGED_IN=false
@@ -203,11 +224,13 @@ fi
 # Login if needed
 if [ "$LOGGED_IN" = false ]; then
     echo -e "${YELLOW}Login Options:${NC}"
-    echo "  1. Token login (recommended for servers)"
-    echo "  2. Browser login (opens browser, then uses callback URL)"
+    echo "  1. Token login (recommended for servers — fast and reliable)"
+    echo "  2. Browser login (callback URL — can fail on headless/remote machines)"
     echo ""
-    read -p "Choose login method (1 or 2) [2]: " LOGIN_METHOD
-    LOGIN_METHOD=${LOGIN_METHOD:-2}
+    echo -e "${CYAN}  Token: https://my.nordaccount.com/dashboard/nordvpn/service-credentials/${NC}"
+    echo ""
+    read -p "Choose login method (1 or 2) [1]: " LOGIN_METHOD
+    LOGIN_METHOD=${LOGIN_METHOD:-1}
     
     case $LOGIN_METHOD in
         1)
@@ -496,8 +519,10 @@ if [[ "$ALLOW_EXTERNAL_SSH" =~ ^[Yy] ]]; then
 fi
 echo ""
 echo -e "${BLUE}To connect to VPN:${NC}"
-echo "  nordvpn connect"
-echo "  nordvpn connect <server_id>         # Specific server (e.g., us123, ie214)"
+echo "  nordvpn connect                                     # Fastest server"
+echo "  nordvpn connect Ireland                             # Specific country"
+echo "  nordvpn connect --group Dedicated_IP                # Your dedicated IP"
+echo "  nordvpn connect --group Dedicated_IP Ireland        # Dedicated IP in a country"
 echo ""
 echo -e "${BLUE}To check status:${NC}"
 echo "  nordvpn status"
@@ -527,7 +552,7 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
     echo -e "${YELLOW}Choose connection mode:${NC}"
     echo "  1. Fastest server"
     echo "  2. Specific country (default flow)"
-    echo "  3. Dedicated IP server (connect by server id)"
+    echo "  3. Dedicated IP (account-assigned, uses --group Dedicated_IP)"
     echo ""
     read -p "Mode (1/2/3) [2]: " CONNECT_MODE
     CONNECT_MODE=${CONNECT_MODE:-2}
@@ -544,34 +569,27 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
     elif [ "$CONNECT_MODE" = "3" ]; then
         echo ""
         echo -e "${YELLOW}Dedicated IP mode${NC}"
-        echo -e "${CYAN}Use the server identifier from Nord Account (e.g., ie214, us123).${NC}"
-        PREFERRED_SERVER_ID=$(detect_preferred_server_id)
-        if [ -n "$PREFERRED_SERVER_ID" ]; then
-            echo -e "${CYAN}Detected previous server id: ${PREFERRED_SERVER_ID}${NC}"
-        fi
-        read -p "Dedicated server id [ie214]: " DEDICATED_SERVER
-        # default to ie214 when enter is pressed
-        DEDICATED_SERVER=${DEDICATED_SERVER:-ie214}
-
-        if [ -z "$DEDICATED_SERVER" ]; then
-            echo -e "${RED}Dedicated server id cannot be empty.${NC}"
-            exit 1
-        fi
+        echo -e "${CYAN}Connects via your account's assigned dedicated IP using --group Dedicated_IP.${NC}"
+        echo -e "${CYAN}Do NOT use a server id (e.g. ie214) — that gives a shared pool IP, not your dedicated IP.${NC}"
+        echo ""
+        read -p "Country for dedicated IP (optional, e.g. Ireland) [Ireland]: " DEDICATED_COUNTRY
+        DEDICATED_COUNTRY=${DEDICATED_COUNTRY:-Ireland}
 
         read -p "Expected dedicated public IPv4 (optional): " EXPECTED_DEDICATED_IP
 
         echo ""
-        echo -e "${YELLOW}Connecting to dedicated server ${DEDICATED_SERVER}...${NC}"
-        if nordvpn connect "${DEDICATED_SERVER}"; then
-            echo -e "${GREEN}✓ Connected to ${DEDICATED_SERVER} successfully!${NC}"
+        echo -e "${YELLOW}Connecting to dedicated IP${DEDICATED_COUNTRY:+ in ${DEDICATED_COUNTRY}}...${NC}"
+        if nordvpn connect --group Dedicated_IP ${DEDICATED_COUNTRY:+"$DEDICATED_COUNTRY"}; then
+            echo -e "${GREEN}✓ Connected via dedicated IP successfully!${NC}"
             print_connection_verification "${EXPECTED_DEDICATED_IP}"
             echo ""
             echo -e "${CYAN}Optional: persist this on reboot:${NC}"
-            echo "  nordvpn set autoconnect on ${DEDICATED_SERVER}"
+            echo "  nordvpn set autoconnect on --group Dedicated_IP${DEDICATED_COUNTRY:+ ${DEDICATED_COUNTRY}}"
         else
             echo -e "${RED}✗ Connection failed${NC}"
-            echo -e "${YELLOW}Check the dedicated server id and that Dedicated IP service is active.${NC}"
-            echo -e "${YELLOW}You can also try: nordvpn connect --group Dedicated_IP${NC}"
+            echo -e "${YELLOW}Make sure Dedicated IP service is active in your Nord Account:${NC}"
+            echo -e "  https://my.nordaccount.com/dashboard/nordvpn/dedicated-ip/"
+            echo -e "${YELLOW}Try manually: nordvpn connect --group Dedicated_IP${NC}"
         fi
     else
         echo ""
@@ -648,10 +666,11 @@ if [[ "$CONNECT_NOW" =~ ^[Yy] ]]; then
 else
     echo ""
     echo -e "${CYAN}You can connect later with:${NC}"
-    echo "  nordvpn connect                    # Fastest server"
-    echo "  nordvpn connect <server_id>        # Specific server (e.g., us123, ie214)"
-    echo "  nordvpn connect United_States      # Specific country"
-    echo "  nordvpn set autoconnect on <server_id>  # Keep using one server on reboot"
-    echo "  nordvpn countries                  # List all countries"
+    echo "  nordvpn connect                                     # Fastest server"
+    echo "  nordvpn connect Ireland                             # Specific country"
+    echo "  nordvpn connect --group Dedicated_IP                # Your dedicated IP"
+    echo "  nordvpn connect --group Dedicated_IP Ireland        # Dedicated IP in a country"
+    echo "  nordvpn set autoconnect on --group Dedicated_IP     # Persist dedicated IP on reboot"
+    echo "  nordvpn countries                                   # List all countries"
 fi
 echo ""
