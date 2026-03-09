@@ -9,6 +9,27 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Run the NordVPN installer from an absolute temporary path so this helper works
+# no matter which directory it is launched from.
+run_nordvpn_installer() {
+    local installer_path
+
+    installer_path=$(mktemp "${TMPDIR:-/tmp}/nordvpn-install.XXXXXX.sh")
+    if ! wget -q https://downloads.nordcdn.com/apps/linux/install.sh -O "$installer_path"; then
+        echo -e "${RED}Error: Failed to download the NordVPN installer.${NC}"
+        rm -f "$installer_path"
+        return 1
+    fi
+
+    if ! bash "$installer_path"; then
+        echo -e "${RED}Error: NordVPN installer failed.${NC}"
+        rm -f "$installer_path"
+        return 1
+    fi
+
+    rm -f "$installer_path"
+}
+
 # Add a subnet to NordVPN allowlist (idempotent-ish with friendly output)
 add_allowlist_subnet() {
     local subnet="$1"
@@ -102,53 +123,85 @@ echo ""
 # Check if nordvpn is installed
 if ! command -v nordvpn &> /dev/null; then
     echo -e "${RED}Error: NordVPN is not installed. Installing...${NC}"
-    wget https://downloads.nordcdn.com/apps/linux/install.sh -O $HOME/install_nordvpn.sh
-    bash install_nordvpn.sh
+    run_nordvpn_installer
 fi
 
-# Check for NordVPN update (must happen before any nordvpn commands that show the warning)
+# Check for NordVPN update by comparing installed vs latest available in apt,
+# with a fallback to the NordVPN CLI's own update nag in case apt metadata is stale.
 echo -e "${YELLOW}Checking NordVPN version...${NC}"
-VERSION_CHECK=$(nordvpn --version 2>/dev/null || true)
-if nordvpn account 2>&1 | grep -qi "new version\|please update"; then
+APT_POLICY=$(apt-cache policy nordvpn 2>/dev/null || true)
+APT_INSTALLED=$(echo "$APT_POLICY" | awk '/Installed:/{print $2}' | head -1 || true)
+APT_CANDIDATE=$(echo "$APT_POLICY" | awk '/Candidate:/{print $2}' | head -1 || true)
+INSTALLED_VER=$(nordvpn --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+if [ -z "$INSTALLED_VER" ] && [ -n "$APT_INSTALLED" ] && [ "$APT_INSTALLED" != "(none)" ]; then
+    INSTALLED_VER=$(echo "$APT_INSTALLED" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+fi
+LATEST_VER=$(echo "$APT_CANDIDATE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+UPDATE_AVAILABLE=false
+
+if [ -n "$INSTALLED_VER" ]; then
+    echo -e "  Installed: ${CYAN}${INSTALLED_VER}${NC}"
+fi
+
+if [ -n "$APT_CANDIDATE" ] && [ "$APT_CANDIDATE" != "(none)" ] && \
+   [ -n "$APT_INSTALLED" ] && [ "$APT_INSTALLED" != "(none)" ] && \
+   command -v dpkg &> /dev/null && dpkg --compare-versions "$APT_CANDIDATE" gt "$APT_INSTALLED"; then
     UPDATE_AVAILABLE=true
-elif nordvpn connect --help 2>&1 | grep -qi "new version\|please update"; then
-    UPDATE_AVAILABLE=true
-else
-    # Run a cheap command to capture update nag
-    _nag=$(nordvpn status 2>&1 || true)
-    if echo "$_nag" | grep -qi "new version\|please update"; then
-        UPDATE_AVAILABLE=true
-    else
-        UPDATE_AVAILABLE=false
+    echo -e "  Latest:    ${GREEN}${LATEST_VER}${NC}"
+fi
+
+_nag=$(nordvpn status 2>&1 || true)
+if echo "$_nag" | grep -qi "new version\|please update"; then
+    if [ "$UPDATE_AVAILABLE" = false ] && [ -z "$LATEST_VER" ]; then
+        echo -e "  ${YELLOW}(latest version unknown, but NordVPN reports an update is available)${NC}"
+    elif [ "$UPDATE_AVAILABLE" = false ] && [ -n "$LATEST_VER" ] && [ "$LATEST_VER" = "$INSTALLED_VER" ]; then
+        echo -e "  ${YELLOW}(NordVPN reports an update, but local apt metadata still shows ${LATEST_VER}; apt cache may be stale)${NC}"
     fi
+    UPDATE_AVAILABLE=true
+elif [ -n "$INSTALLED_VER" ] && [ -z "$LATEST_VER" ]; then
+    echo -e "  ${GREEN}(latest version unknown, no update nag detected)${NC}"
+elif [ -z "$INSTALLED_VER" ] && [ -z "$LATEST_VER" ]; then
+    echo -e "  ${YELLOW}(could not determine the installed version or latest candidate)${NC}"
 fi
 
 if [ "$UPDATE_AVAILABLE" = true ]; then
-    echo -e "${YELLOW}⚠ A new version of NordVPN is available.${NC}"
-    echo -e "  ${RED}Outdated NordVPN versions are known to break Dedicated IP routing.${NC}"
-    echo -e "  ${CYAN}It is strongly recommended to update before continuing.${NC}"
+    echo ""
+    echo -e "${YELLOW}⚠ A newer version of NordVPN is available.${NC}"
+    echo -e "  ${RED}Outdated versions are known to break Dedicated IP routing.${NC}"
+    echo -e "  ${CYAN}Press Y to update now (recommended), or N to skip.${NC}"
     echo ""
     read -p "Update NordVPN now? (y/n) [y]: " DO_UPDATE
     DO_UPDATE=${DO_UPDATE:-y}
     if [[ "$DO_UPDATE" =~ ^[Yy] ]]; then
+        echo ""
         echo -e "${YELLOW}Updating NordVPN...${NC}"
         if sh <(curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh); then
-            echo -e "${GREEN}✓ NordVPN updated successfully.${NC}"
-            echo -e "${YELLOW}Note: You may need to re-login after the update.${NC}"
+            NEW_VER=$(nordvpn --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            echo -e "${GREEN}✓ NordVPN updated to ${NEW_VER}.${NC}"
+            echo -e "${YELLOW}⚠ You will need to re-login — the update invalidates the existing session.${NC}"
+            LOGGED_IN=false
         else
             echo -e "${RED}✗ Update failed. Continuing with current version.${NC}"
         fi
     else
-        echo -e "${YELLOW}Skipping update. Dedicated IP may not work correctly with an outdated app.${NC}"
+        echo -e "${YELLOW}Skipping update. Dedicated IP may not work correctly on ${INSTALLED_VER}.${NC}"
     fi
     echo ""
 else
-    echo -e "${GREEN}✓ NordVPN is up to date.${NC}"
+    if [ -n "$LATEST_VER" ] && [ "$LATEST_VER" = "$INSTALLED_VER" ]; then
+        echo -e "${GREEN}✓ NordVPN ${INSTALLED_VER} is up to date.${NC}"
+    elif [ -n "$INSTALLED_VER" ]; then
+        echo -e "${GREEN}✓ No update detected for NordVPN ${INSTALLED_VER}.${NC}"
+    else
+        echo -e "${GREEN}✓ No update detected.${NC}"
+    fi
 fi
 
-# Check current login status
+# Check current login status (skip re-check if update already forced a re-login)
 echo -e "${YELLOW}Checking NordVPN login status...${NC}"
-if nordvpn account 2>&1 | grep -iq "not logged in"; then
+if [ "${LOGGED_IN:-}" = "false" ]; then
+    echo -e "${YELLOW}Re-login required after update.${NC}"
+elif nordvpn account 2>&1 | grep -iq "not logged in"; then
     echo -e "${YELLOW}Not logged in. Proceeding with login...${NC}"
     LOGGED_IN=false
 else

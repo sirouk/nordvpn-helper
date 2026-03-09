@@ -3,7 +3,8 @@
 Minimal helper for first-time NordVPN CLI setup on Linux.
 
 - Prereqs: NordVPN Linux app installed, user already logged in or ready with token/callback URL.
-- Run: `./nordvpn_helper.sh`
+- Run from the repo: `./nordvpn_helper.sh`
+- Run from anywhere: `~/nordvpn-helper/nordvpn_helper.sh`
 - Flow: confirms login, forces LAN discovery on, allowlists SSH (22) and optional work IP, then guides you to connect with one of:
   - fastest server,
   - country-based server (defaults to Ireland),
